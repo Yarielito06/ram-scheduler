@@ -18,7 +18,9 @@ import {
   doc,
   serverTimestamp,
   writeBatch,
-  where
+  where,
+  getDoc,
+  setDoc
 } from 'firebase/firestore';
 import { 
   DndContext, 
@@ -55,7 +57,7 @@ import {
   MoreHorizontal,
   Globe,
   CalendarDays,
-  GripVertical // Icon for dragging
+  GripVertical
 } from 'lucide-react';
 
 // --- Firebase Configuration ---
@@ -105,17 +107,15 @@ const formatTime = (timeString, locale = 'en-US') => {
 };
 
 // --- DRAG & DROP COMPONENTS ---
-
-// 1. Draggable Event Dot
 function DraggableEvent({ event, isAdmin }) {
   const {attributes, listeners, setNodeRef, transform} = useDraggable({
     id: event.id,
-    data: { event } // Pass event data so we know what we are dragging
+    data: { event } 
   });
   
   const style = transform ? {
     transform: CSS.Translate.toString(transform),
-    zIndex: 999, // Ensure dragged item is on top
+    zIndex: 999, 
     opacity: 0.8,
     cursor: 'grabbing'
   } : { cursor: 'grab' };
@@ -132,14 +132,11 @@ function DraggableEvent({ event, isAdmin }) {
   );
 }
 
-// 2. Droppable Calendar Day
 function DroppableDay({ day, month, year, children, onSelect }) {
-  // Create a unique ID for this day cell (e.g., "day-2023-11-30")
   const dateId = `day-${year}-${month}-${day}`;
-  
   const {isOver, setNodeRef} = useDroppable({
     id: dateId,
-    data: { day, month, year } // Pass date info so we know WHERE we dropped it
+    data: { day, month, year } 
   });
 
   const isToday = new Date().getDate() === day && new Date().getMonth() === month && new Date().getFullYear() === year;
@@ -161,21 +158,54 @@ function DroppableDay({ day, month, year, children, onSelect }) {
 }
 
 
-// --- The Brain: Logic Parser ---
+// --- The Brain: Logic Parser (NOW WITH NICKNAME SUPPORT) ---
 const parseCommand = (text, manualDateOverride = null) => {
   const lowerText = text.toLowerCase();
   
+  // 1. Admin Commands
   if (lowerText.includes('ram sudo mode')) return { isCommand: true, command: 'ACTIVATE_ADMIN', originalText: text };
   if (lowerText.includes('ram exit sudo')) return { isCommand: true, command: 'DEACTIVATE_ADMIN', originalText: text };
   if (lowerText.includes('ram nuke database')) return { isCommand: true, command: 'NUKE_DB', originalText: text };
 
-  // 1. Time Extraction
+  // 2. CONVERSATIONAL INTENTS (Small Talk)
+  // Check if the user is setting a nickname
+  if (lowerText.startsWith("call me") || lowerText.startsWith("my name is") || lowerText.startsWith("llámame") || lowerText.startsWith("mi nombre es")) {
+      let name = text.replace(/call me|my name is|llámame|mi nombre es/gi, '').trim();
+      // Remove punctuation
+      name = name.replace(/[.,!]/g, '');
+      if (name.length > 0) {
+          return { isConversation: true, type: 'SET_NICKNAME', name: name, originalText: text };
+      }
+  }
+
+  const greetings = ['hi', 'hello', 'hey', 'hola', 'buenas', 'yo', 'sup', 'greetings'];
+  const helpRequests = ['help', 'ayuda', 'what can you do', 'que puedes hacer', 'guide'];
+  const statusChecks = ['how are you', 'como estas', 'what\'s up', 'que tal'];
+  const gratitude = ['thanks', 'thank you', 'gracias', 'thx'];
+
+  const words = lowerText.split(' ').filter(w => w.length > 1);
+  
+  if (greetings.some(g => lowerText.includes(g)) && !/\d/.test(lowerText) && !lowerText.includes('meet') && !lowerText.includes('gym')) {
+      return { isConversation: true, type: 'GREETING', originalText: text };
+  }
+  if (helpRequests.some(h => lowerText.includes(h))) {
+      return { isConversation: true, type: 'HELP', originalText: text };
+  }
+  if (statusChecks.some(s => lowerText.includes(s))) {
+      return { isConversation: true, type: 'STATUS', originalText: text };
+  }
+  if (gratitude.some(g => lowerText.includes(g))) {
+      return { isConversation: true, type: 'GRATITUDE', originalText: text };
+  }
+
+
+  // 3. Time Extraction (Scheduler Logic)
   const timeRangeRegex = /(\d{1,2}(:\d{2})?\s?(am|pm))\s*(?:-|to|a)\s*(\d{1,2}(:\d{2})?\s?(am|pm))/i;
   const timeRangeMatch = lowerText.match(timeRangeRegex);
   const timeRegex = /(\d{1,2}(:\d{2})?\s?(am|pm)|(\d{1,2}:\d{2})|a las \d{1,2})/i;
   const timeMatch = lowerText.match(timeRegex);
 
-  // 2. Recurrence Extraction
+  // 4. Recurrence Extraction
   const daysMap = { 
       sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
       dom: 0, lun: 1, mar: 2, mie: 3, jue: 4, vie: 5, sab: 6 
@@ -210,7 +240,7 @@ const parseCommand = (text, manualDateOverride = null) => {
     }
   }
 
-  // 3. Date Parsing
+  // 5. Date Parsing
   const months = { 
       jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
       ene: 0, abr: 3, ago: 7, dic: 11
@@ -355,13 +385,7 @@ const parseCommand = (text, manualDateOverride = null) => {
 export default function App() {
   const [user, setUser] = useState(null);
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState([
-    { 
-      id: 'intro', 
-      sender: 'ram', 
-      text: "Hello! I'm Ram v13.0. Try dragging an event in the calendar to reschedule it!" 
-    }
-  ]);
+  const [messages, setMessages] = useState([]); // Initialize empty, will load after auth
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [permission, setPermission] = useState('default');
@@ -377,16 +401,11 @@ export default function App() {
   const [selectedDay, setSelectedDay] = useState(null); 
   const [pickerDate, setPickerDate] = useState(''); 
   const dateInputRef = useRef(null);
+  const [nickname, setNickname] = useState(null); // STATE FOR NICKNAME
 
-  // --- DRAG SENSORS ---
-  // We need sensors to differentiate between a "click" (to open details) and a "drag" (to reschedule)
   const sensors = useSensors(
-    useSensor(MouseSensor, {
-        activationConstraint: { distance: 8 } // Drag must move 8px to start
-    }),
-    useSensor(TouchSensor, {
-        activationConstraint: { delay: 200, tolerance: 5 } // Long press to drag on mobile
-    })
+    useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } })
   );
 
   useEffect(() => {
@@ -409,7 +428,37 @@ export default function App() {
       }
     };
     initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (u) => { setUser(u); setLoading(false); });
+    const unsubscribe = onAuthStateChanged(auth, async (u) => { 
+        setUser(u); 
+        setLoading(false);
+        
+        // CHECK FOR NICKNAME ON LOGIN
+        if (u) {
+            const userRef = doc(db, 'artifacts', appId, 'users', u.uid, 'profile', 'info');
+            try {
+                const docSnap = await getDoc(userRef);
+                if (docSnap.exists() && docSnap.data().nickname) {
+                    setNickname(docSnap.data().nickname);
+                    // Standard Greeting
+                    setMessages([{ 
+                        id: 'intro', 
+                        sender: 'ram', 
+                        text: `Hello ${docSnap.data().nickname}! I'm ready.` 
+                    }]);
+                } else {
+                    // Ask for nickname if not found
+                    setMessages([{ 
+                        id: 'ask-name', 
+                        sender: 'ram', 
+                        text: "Hello! I'm Ram v15.0. I don't have a name for you yet. How should I call you? (Type 'Call me [Name]')" 
+                    }]);
+                }
+            } catch (e) {
+                console.log("Profile fetch error", e);
+                setMessages([{ id: 'intro', sender: 'ram', text: "Hello! Ready to schedule." }]);
+            }
+        }
+    });
     if ('Notification' in window) setPermission(Notification.permission);
     return () => unsubscribe();
   }, []);
@@ -425,44 +474,24 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // --- DRAG END HANDLER (Smart Reschedule) ---
   const handleDragEnd = async (event) => {
       const { active, over } = event;
-      
       if (over && active.id !== over.id) {
-          // 'active.data.current.event' is the event we dragged
-          // 'over.data.current' contains the target date (day, month, year)
-          
           const draggedEvent = active.data.current.event;
           const target = over.data.current;
-          
           if (!target || !draggedEvent) return;
-
-          // Construct new date object
           const originalDate = new Date(draggedEvent.date);
           const newDate = new Date(target.year, target.month, target.day);
-          
-          // Preserve the original TIME
           newDate.setHours(originalDate.getHours());
           newDate.setMinutes(originalDate.getMinutes());
-          
-          // Optimistic UI Update (optional, but feels snappier)
-          // We rely on Firestore listener for simplicity, but let's notify user
           const msg = language.startsWith('es') 
             ? `🔄 He movido "${draggedEvent.title}" al ${newDate.toLocaleDateString('es-ES')}.`
             : `🔄 I moved "${draggedEvent.title}" to ${newDate.toLocaleDateString()}.`;
-            
           setMessages(prev => [...prev, { id: Date.now(), sender: 'ram', text: msg }]);
-
-          // Update Firestore
           try {
               const eventRef = doc(db, 'artifacts', appId, 'users', user.uid, 'schedule', draggedEvent.id);
-              await updateDoc(eventRef, {
-                  date: newDate.toISOString()
-              });
-          } catch (err) {
-              console.error("Reschedule failed", err);
-          }
+              await updateDoc(eventRef, { date: newDate.toISOString() });
+          } catch (err) { console.error("Reschedule failed", err); }
       }
   };
 
@@ -492,9 +521,10 @@ export default function App() {
         if (minutesDiff < 0 && !event.hasAskedFollowUp) {
           const hoursPast = Math.abs(timeDiff / 1000 / 60 / 60);
           if (hoursPast < 3) {
+             const greeting = nickname ? (language.startsWith('es') ? `Hola ${nickname}` : `Hey ${nickname}`) : (language.startsWith('es') ? "Hola" : "Hey");
              const msg = language.startsWith('es')
-                ? `Hola, ¿qué tal fue "${event.title}"?`
-                : `Hey, how did "${event.title}" go?`;
+                ? `${greeting}, ¿qué tal fue "${event.title}"?`
+                : `${greeting}, how did "${event.title}" go?`;
              setMessages(prev => [...prev, { id: Date.now(), sender: 'ram', text: msg, isFollowUp: true }]);
           }
           try { await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'schedule', event.id), { hasAskedFollowUp: true }); } catch (e) {}
@@ -502,7 +532,7 @@ export default function App() {
       });
     }, 10000);
     return () => clearInterval(interval);
-  }, [events, user, permission, language]);
+  }, [events, user, permission, language, nickname]);
 
   const handleSend = async (e, forcedInput = null) => {
     if (e) e.preventDefault();
@@ -518,6 +548,7 @@ export default function App() {
 
     const analysis = parseCommand(userMsg.text, pickerDate);
 
+    // --- 1. Admin Commands ---
     if (analysis.isCommand) {
         if (analysis.command === 'ACTIVATE_ADMIN') { setIsAdmin(true); return; }
         if (analysis.command === 'DEACTIVATE_ADMIN') { setIsAdmin(false); return; }
@@ -529,6 +560,49 @@ export default function App() {
         }
     }
 
+    // --- 2. Conversational & Profile Logic (NEW) ---
+    if (analysis.isConversation) {
+        setTimeout(async () => {
+            let reply = "";
+            
+            // SAVE NICKNAME
+            if (analysis.type === 'SET_NICKNAME') {
+                const newName = analysis.name.charAt(0).toUpperCase() + analysis.name.slice(1);
+                setNickname(newName);
+                reply = language.startsWith('es') 
+                    ? `¡Entendido! Te llamaré ${newName} a partir de ahora.` 
+                    : `Got it! I'll call you ${newName} from now on.`;
+                
+                // Save to Firestore
+                try {
+                    const userRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
+                    await setDoc(userRef, { nickname: newName }, { merge: true });
+                } catch (err) { console.error("Error saving name", err); }
+
+            } else if (analysis.type === 'GREETING') {
+                const nameStr = nickname ? ` ${nickname}` : '';
+                reply = language.startsWith('es') 
+                    ? `¡Hola${nameStr}! ¿En qué puedo ayudarte hoy?` 
+                    : `Hey${nameStr}! Ready to organize your schedule?`;
+            } else if (analysis.type === 'HELP') {
+                reply = language.startsWith('es')
+                    ? "Soy Ram. Puedo agendar eventos y charlar. Prueba: 'Agendar gym mañana a las 6'."
+                    : "I'm Ram. I can book meetings or chat. Try: 'Schedule Gym tomorrow at 6pm'.";
+            } else if (analysis.type === 'STATUS') {
+                reply = language.startsWith('es')
+                    ? "Estoy funcionando al 100%."
+                    : "I'm online and running perfectly.";
+            } else if (analysis.type === 'GRATITUDE') {
+                reply = language.startsWith('es')
+                    ? "¡De nada!"
+                    : "You're welcome!";
+            }
+            setMessages(prev => [...prev, { id: Date.now() + 1, sender: 'ram', text: reply }]);
+        }, 500);
+        return;
+    }
+
+    // --- 3. Scheduler Logic ---
     setTimeout(async () => {
       if (analysis.isValid) {
         try {
@@ -582,8 +656,8 @@ export default function App() {
         }
       } else {
         const errorMsg = language.startsWith('es')
-            ? "No entendí la fecha. ¿Podrías usar el icono 📅 o decir '12 de diciembre'?"
-            : "I didn't catch the date. Could you use the 📅 icon or say '12th December'?";
+            ? "No entendí. ¿Podrías decirme qué evento quieres agendar? O usa el icono 📅."
+            : "I didn't catch that. What would you like to schedule? Or use the 📅 icon.";
         setMessages(prev => [...prev, { id: Date.now() + 1, sender: 'ram', text: errorMsg }]);
       }
     }, 600);
