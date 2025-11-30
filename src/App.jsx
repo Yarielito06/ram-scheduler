@@ -21,6 +21,16 @@ import {
   where
 } from 'firebase/firestore';
 import { 
+  DndContext, 
+  useDraggable, 
+  useDroppable,
+  MouseSensor,
+  TouchSensor,
+  useSensor,
+  useSensors
+} from '@dnd-kit/core';
+import { CSS } from '@dnd-kit/utilities';
+import { 
   Send, 
   Calendar as CalendarIcon, 
   Clock, 
@@ -44,7 +54,8 @@ import {
   Check,
   MoreHorizontal,
   Globe,
-  CalendarDays // New icon for the picker
+  CalendarDays,
+  GripVertical // Icon for dragging
 } from 'lucide-react';
 
 // --- Firebase Configuration ---
@@ -92,6 +103,63 @@ const formatTime = (timeString, locale = 'en-US') => {
   }
   return timeString;
 };
+
+// --- DRAG & DROP COMPONENTS ---
+
+// 1. Draggable Event Dot
+function DraggableEvent({ event, isAdmin }) {
+  const {attributes, listeners, setNodeRef, transform} = useDraggable({
+    id: event.id,
+    data: { event } // Pass event data so we know what we are dragging
+  });
+  
+  const style = transform ? {
+    transform: CSS.Translate.toString(transform),
+    zIndex: 999, // Ensure dragged item is on top
+    opacity: 0.8,
+    cursor: 'grabbing'
+  } : { cursor: 'grab' };
+
+  return (
+    <div 
+      ref={setNodeRef} 
+      style={style} 
+      {...listeners} 
+      {...attributes}
+      className={`h-2 w-2 rounded-full cursor-grab active:cursor-grabbing transition-colors ${event.hasAskedFollowUp ? 'bg-slate-600' : isAdmin ? 'bg-amber-500' : 'bg-emerald-500 ring-2 ring-transparent hover:ring-emerald-300/50'}`} 
+      title={`Drag to reschedule: ${event.title}`}
+    />
+  );
+}
+
+// 2. Droppable Calendar Day
+function DroppableDay({ day, month, year, children, onSelect }) {
+  // Create a unique ID for this day cell (e.g., "day-2023-11-30")
+  const dateId = `day-${year}-${month}-${day}`;
+  
+  const {isOver, setNodeRef} = useDroppable({
+    id: dateId,
+    data: { day, month, year } // Pass date info so we know WHERE we dropped it
+  });
+
+  const isToday = new Date().getDate() === day && new Date().getMonth() === month && new Date().getFullYear() === year;
+
+  return (
+    <button 
+      ref={setNodeRef}
+      onClick={() => onSelect(day)}
+      className={`relative bg-slate-900/50 border rounded-lg p-2 flex flex-col items-start transition-all text-left focus:outline-none focus:ring-1 focus:ring-emerald-500/50
+        ${isOver ? 'bg-emerald-900/40 border-emerald-500 scale-[1.02] shadow-lg shadow-emerald-900/20' : isToday ? 'border-emerald-500/50 bg-emerald-900/10' : 'border-slate-800 hover:bg-slate-800'}
+      `}
+    >
+      <span className={`text-xs font-bold mb-1 ${isToday ? 'text-emerald-400' : 'text-slate-400'}`}>{day}</span>
+      <div className="flex flex-wrap gap-1 content-start overflow-hidden w-full h-full min-h-[20px]">
+        {children}
+      </div>
+    </button>
+  );
+}
+
 
 // --- The Brain: Logic Parser ---
 const parseCommand = (text, manualDateOverride = null) => {
@@ -152,7 +220,6 @@ const parseCommand = (text, manualDateOverride = null) => {
   let dateFound = false;
   let matchedDateString = '';
 
-  // *** DATE PICKER OVERRIDE ***
   if (manualDateOverride) {
       dateObj = new Date(manualDateOverride);
       dateFound = true;
@@ -163,9 +230,7 @@ const parseCommand = (text, manualDateOverride = null) => {
   } else if (lowerText.includes('today') || lowerText.includes('hoy')) {
     dateFound = true;
   } else {
-    // Improved Regex allowing single spaces
     const dayMonthRegex = /(?:the|el)?\s*(\d{1,2})(?:st|nd|rd|th|er|o)?\s+(?:(?:of|de)\s+)?([a-z]{3,})/i; 
-    
     const monthDayRegex = /([a-z]{3,})\s+(?:the|el)?\s*(\d{1,2})(?:st|nd|rd|th|er|o)?/i;
     const slashDateRegex = /(\d{1,2})[/-](\d{1,2})/i;
     const monthContextRegex = /\b(?:in|for|starting|from|en|para|desde)\s+([a-z]{3,})/i;
@@ -213,7 +278,6 @@ const parseCommand = (text, manualDateOverride = null) => {
     }
   }
 
-  // 4. Apply Time
   let timeStr = 'All Day';
   let sortTimeObj = new Date(dateObj); 
 
@@ -246,7 +310,6 @@ const parseCommand = (text, manualDateOverride = null) => {
     d.setHours(hourInt, parseInt(minutes), 0, 0);
   }
 
-  // 5. Clean Activity Text
   let activity = text;
   if (timeRangeMatch) activity = activity.replace(timeRangeMatch[0], '');
   else if (timeMatch) activity = activity.replace(timeMatch[0], '');
@@ -296,7 +359,7 @@ export default function App() {
     { 
       id: 'intro', 
       sender: 'ram', 
-      text: "Hello! I'm Ram v12.0. The calendar view is back and looking better than ever!" 
+      text: "Hello! I'm Ram v13.0. Try dragging an event in the calendar to reschedule it!" 
     }
   ]);
   const [events, setEvents] = useState([]);
@@ -312,10 +375,19 @@ export default function App() {
   const [viewMode, setViewMode] = useState('list'); 
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDay, setSelectedDay] = useState(null); 
-  
-  // --- New: Date Picker State ---
   const [pickerDate, setPickerDate] = useState(''); 
   const dateInputRef = useRef(null);
+
+  // --- DRAG SENSORS ---
+  // We need sensors to differentiate between a "click" (to open details) and a "drag" (to reschedule)
+  const sensors = useSensors(
+    useSensor(MouseSensor, {
+        activationConstraint: { distance: 8 } // Drag must move 8px to start
+    }),
+    useSensor(TouchSensor, {
+        activationConstraint: { delay: 200, tolerance: 5 } // Long press to drag on mobile
+    })
+  );
 
   useEffect(() => {
     const initAuth = async () => {
@@ -352,6 +424,47 @@ export default function App() {
     }, (error) => console.error("Error fetching schedule:", error));
     return () => unsubscribe();
   }, [user]);
+
+  // --- DRAG END HANDLER (Smart Reschedule) ---
+  const handleDragEnd = async (event) => {
+      const { active, over } = event;
+      
+      if (over && active.id !== over.id) {
+          // 'active.data.current.event' is the event we dragged
+          // 'over.data.current' contains the target date (day, month, year)
+          
+          const draggedEvent = active.data.current.event;
+          const target = over.data.current;
+          
+          if (!target || !draggedEvent) return;
+
+          // Construct new date object
+          const originalDate = new Date(draggedEvent.date);
+          const newDate = new Date(target.year, target.month, target.day);
+          
+          // Preserve the original TIME
+          newDate.setHours(originalDate.getHours());
+          newDate.setMinutes(originalDate.getMinutes());
+          
+          // Optimistic UI Update (optional, but feels snappier)
+          // We rely on Firestore listener for simplicity, but let's notify user
+          const msg = language.startsWith('es') 
+            ? `🔄 He movido "${draggedEvent.title}" al ${newDate.toLocaleDateString('es-ES')}.`
+            : `🔄 I moved "${draggedEvent.title}" to ${newDate.toLocaleDateString()}.`;
+            
+          setMessages(prev => [...prev, { id: Date.now(), sender: 'ram', text: msg }]);
+
+          // Update Firestore
+          try {
+              const eventRef = doc(db, 'artifacts', appId, 'users', user.uid, 'schedule', draggedEvent.id);
+              await updateDoc(eventRef, {
+                  date: newDate.toISOString()
+              });
+          } catch (err) {
+              console.error("Reschedule failed", err);
+          }
+      }
+  };
 
   useEffect(() => {
     if (!user || events.length === 0) return;
@@ -614,14 +727,12 @@ export default function App() {
             </div>
         )}
 
-        {/* INPUT AREA WITH DATE PICKER */}
         <div className="p-4 bg-slate-900 border-t border-slate-800">
           <div className="flex items-center gap-2">
             <button onClick={startListening} className={`p-3 rounded-xl transition-all ${isListening ? 'bg-red-500/20 text-red-500 animate-pulse ring-2 ring-red-500/50' : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-emerald-400'}`} title="Voice Command">
               {isListening ? <MicOff size={20} /> : <Mic size={20} />}
             </button>
             
-            {/* STYLED DATE INPUT TRIGGER */}
             <div className="relative group">
                 <input 
                     type="datetime-local" 
@@ -670,43 +781,42 @@ export default function App() {
             )}
         </div>
 
-        {/* --- DAY DETAILS MODAL --- */}
-        {viewMode === 'calendar' && selectedDay !== null && (
-            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-                <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
-                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50">
-                        <div className="flex items-center gap-2">
-                            <div className="bg-emerald-500/10 p-1.5 rounded-lg text-emerald-400 font-bold">{selectedDay}</div>
-                            <h3 className="font-semibold text-slate-200">
-                                {new Date(currentDate.getFullYear(), currentDate.getMonth(), selectedDay).toLocaleDateString(language, { weekday: 'long', month: 'long' })}
-                            </h3>
-                        </div>
-                        <button onClick={() => setSelectedDay(null)} className="text-slate-500 hover:text-white transition-colors"><XCircle size={20} /></button>
+        {/* --- DND CONTEXT WRAPPER FOR DRAG SUPPORT --- */}
+        <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+            {viewMode === 'calendar' && (
+                <div className="flex-1 px-6 pb-6 overflow-hidden flex flex-col">
+                    <div className="grid grid-cols-7 mb-2 text-center">
+                        {(language.startsWith('es') ? ['Dom','Lun','Mar','Mie','Jue','Vie','Sab'] : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']).map(d => (
+                            <div key={d} className="text-xs font-bold text-slate-500 uppercase">{d}</div>
+                        ))}
                     </div>
                     
-                    <div className="p-4 max-h-[60vh] overflow-y-auto space-y-3 custom-scrollbar">
-                        {getEventsForDay(selectedDay).length === 0 ? (
-                            <div className="text-center py-6">
-                                <p className="text-slate-500 text-sm">{language.startsWith('es') ? 'Sin eventos.' : 'No events planned.'}</p>
-                                <button onClick={() => { setInput(language.startsWith('es') ? `Agendar evento el ${selectedDay} de ${currentDate.toLocaleString('es-ES', { month: 'long' })} a las ` : `Schedule event on the ${selectedDay}th of ${currentDate.toLocaleString('default', { month: 'long' })} at `); setSelectedDay(null); }} className="mt-2 text-xs text-emerald-400 hover:underline">
-                                    + {language.startsWith('es') ? 'Crear' : 'Add Event'}
-                                </button>
-                            </div>
-                        ) : (
-                            getEventsForDay(selectedDay).map((event) => (
-                                <div key={event.id} className="flex items-center justify-between bg-slate-800/50 p-3 rounded-lg border border-slate-800 hover:border-emerald-500/30 transition-all">
-                                    <div>
-                                        <h4 className={`font-medium text-sm ${event.hasAskedFollowUp ? 'text-slate-500 line-through' : 'text-slate-200'}`}>{event.title}</h4>
-                                        <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1"><Clock size={10} className="text-emerald-400" /> {formatTime(event.time, language)}</p>
-                                    </div>
-                                    <button onClick={() => handleDelete(event.id)} className="text-slate-600 hover:text-red-400 p-1.5 rounded-md hover:bg-red-900/20 transition-all"><Trash2 size={14} /></button>
-                                </div>
-                            ))
-                        )}
+                    <div className="grid grid-cols-7 gap-1 flex-1 auto-rows-fr">
+                        {Array(firstDayOfMonth).fill(null).map((_, i) => (
+                            <div key={`empty-${i}`} className="bg-transparent" />
+                        ))}
+                        
+                        {Array(daysInMonth).fill(null).map((_, i) => {
+                            const day = i + 1;
+                            const dayEvents = getEventsForDay(day);
+                            return (
+                                <DroppableDay 
+                                    key={day} 
+                                    day={day} 
+                                    month={currentDate.getMonth()} 
+                                    year={currentDate.getFullYear()}
+                                    onSelect={setSelectedDay}
+                                >
+                                    {dayEvents.map(ev => (
+                                        <DraggableEvent key={ev.id} event={ev} isAdmin={isAdmin} />
+                                    ))}
+                                </DroppableDay>
+                            );
+                        })}
                     </div>
                 </div>
-            </div>
-        )}
+            )}
+        </DndContext>
 
         {viewMode === 'list' && (
             <div className="flex-1 overflow-y-auto px-6 pb-6 custom-scrollbar space-y-3">
@@ -744,42 +854,40 @@ export default function App() {
             </div>
         )}
 
-        {viewMode === 'calendar' && (
-            <div className="flex-1 px-6 pb-6 overflow-hidden flex flex-col">
-                <div className="grid grid-cols-7 mb-2 text-center">
-                    {(language.startsWith('es') ? ['Dom','Lun','Mar','Mie','Jue','Vie','Sab'] : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']).map(d => (
-                        <div key={d} className="text-xs font-bold text-slate-500 uppercase">{d}</div>
-                    ))}
-                </div>
-                
-                <div className="grid grid-cols-7 gap-1 flex-1 auto-rows-fr">
-                    {Array(firstDayOfMonth).fill(null).map((_, i) => (
-                        <div key={`empty-${i}`} className="bg-transparent" />
-                    ))}
+        {/* --- DAY DETAILS MODAL --- */}
+        {selectedDay !== null && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+                <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
+                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50">
+                        <div className="flex items-center gap-2">
+                            <div className="bg-emerald-500/10 p-1.5 rounded-lg text-emerald-400 font-bold">{selectedDay}</div>
+                            <h3 className="font-semibold text-slate-200">
+                                {new Date(currentDate.getFullYear(), currentDate.getMonth(), selectedDay).toLocaleDateString(language, { weekday: 'long', month: 'long' })}
+                            </h3>
+                        </div>
+                        <button onClick={() => setSelectedDay(null)} className="text-slate-500 hover:text-white transition-colors"><XCircle size={20} /></button>
+                    </div>
                     
-                    {Array(daysInMonth).fill(null).map((_, i) => {
-                        const day = i + 1;
-                        const dayEvents = getEventsForDay(day);
-                        const isToday = new Date().getDate() === day && new Date().getMonth() === currentDate.getMonth() && new Date().getFullYear() === currentDate.getFullYear();
-                        
-                        return (
-                            <button 
-                                key={day} 
-                                onClick={() => setSelectedDay(day)}
-                                className={`relative bg-slate-900/50 border ${isToday ? 'border-emerald-500/50 bg-emerald-900/10' : 'border-slate-800'} rounded-lg p-2 flex flex-col items-start hover:bg-slate-800 transition-colors text-left focus:outline-none focus:ring-1 focus:ring-emerald-500/50`}
-                            >
-                                <span className={`text-xs font-bold mb-1 ${isToday ? 'text-emerald-400' : 'text-slate-400'}`}>{day}</span>
-                                <div className="flex flex-wrap gap-1 content-start overflow-hidden w-full">
-                                    {dayEvents.map(ev => (
-                                        <div 
-                                            key={ev.id} 
-                                            className={`h-1.5 w-1.5 rounded-full ${ev.hasAskedFollowUp ? 'bg-slate-600' : isAdmin ? 'bg-amber-500' : 'bg-emerald-500'}`} 
-                                        />
-                                    ))}
+                    <div className="p-4 max-h-[60vh] overflow-y-auto space-y-3 custom-scrollbar">
+                        {getEventsForDay(selectedDay).length === 0 ? (
+                            <div className="text-center py-6">
+                                <p className="text-slate-500 text-sm">{language.startsWith('es') ? 'Sin eventos.' : 'No events planned.'}</p>
+                                <button onClick={() => { setInput(language.startsWith('es') ? `Agendar evento el ${selectedDay} de ${currentDate.toLocaleString('es-ES', { month: 'long' })} a las ` : `Schedule event on the ${selectedDay}th of ${currentDate.toLocaleString('default', { month: 'long' })} at `); setSelectedDay(null); }} className="mt-2 text-xs text-emerald-400 hover:underline">
+                                    + {language.startsWith('es') ? 'Crear' : 'Add Event'}
+                                </button>
+                            </div>
+                        ) : (
+                            getEventsForDay(selectedDay).map((event) => (
+                                <div key={event.id} className="flex items-center justify-between bg-slate-800/50 p-3 rounded-lg border border-slate-800 hover:border-emerald-500/30 transition-all">
+                                    <div>
+                                        <h4 className={`font-medium text-sm ${event.hasAskedFollowUp ? 'text-slate-500 line-through' : 'text-slate-200'}`}>{event.title}</h4>
+                                        <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1"><Clock size={10} className="text-emerald-400" /> {formatTime(event.time, language)}</p>
+                                    </div>
+                                    <button onClick={() => handleDelete(event.id)} className="text-slate-600 hover:text-red-400 p-1.5 rounded-md hover:bg-red-900/20 transition-all"><Trash2 size={14} /></button>
                                 </div>
-                            </button>
-                        );
-                    })}
+                            ))
+                        )}
+                    </div>
                 </div>
             </div>
         )}
